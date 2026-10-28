@@ -1,6 +1,7 @@
 cyclopts
+rich
 librosa
 torch
+demucs
 numpy
-pandas
 pyinstaller

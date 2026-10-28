@@ -2,3 +2,5 @@
 build/
 dist/
 other/
+models/
+__pycache__/
