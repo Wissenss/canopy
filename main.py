@@ -4,10 +4,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 from cyclopts import App
+from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn
+from banner import print_banner
+from version import __version__
 
-app = App()
+app = App(name="canopy", version=__version__)
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".ogg"}
 
@@ -25,11 +28,37 @@ def vocal_cues(file_path: Path, output: Path | None = None, window: int = 60, mi
             silent : disables the progress indicators
     """
 
+    console = Console()
+
+    if not silent:
+        print_banner(console)
+
     if file_path.is_dir():
         pattern = "**/*" if recursive else "*"
         files = sorted(f for f in file_path.glob(pattern) if f.is_file() and f.suffix.lower() in AUDIO_EXTENSIONS)
     else:
         files = [file_path]
+
+    # log the parameters used for this run
+    params = [
+        ("version", __version__),
+        ("started_at", f"{datetime.now():%Y-%m-%d %H:%M:%S}"),
+        ("file_path", str(file_path)),
+        ("files", str(len(files))),
+        ("output", str(output) if output is not None else "-"),
+        ("window", f"{window} s"),
+        ("min_db", f"{min_db} dBFS"),
+        ("recursive", str(recursive)),
+        ("silent", str(silent)),
+    ]
+
+    params_table = Table(box=None, show_header=False, pad_edge=False)
+    params_table.add_column(style="bold blue", no_wrap=True)
+    params_table.add_column()
+    for key, value in params:
+        params_table.add_row(key, value)
+    console.print(params_table)
+    console.print()
 
     if not files:
         print(f"no audio files found in {file_path}", file=sys.stderr)
@@ -39,6 +68,12 @@ def vocal_cues(file_path: Path, output: Path | None = None, window: int = 60, mi
     writer = None
     if output is not None:
         out_file = open(output, "w", newline="", encoding="utf-8")
+
+        # parameters as '#' comment lines (pandas: read_csv(..., comment="#"))
+        for key, value in params:
+            out_file.write(f"# {key}: {value}\n")
+        out_file.write("\n")
+
         if output.suffix.lower() == ".csv":
             writer = csv.writer(out_file)
             writer.writerow(["file", "vocals_start", "vocals_end", "processing_time", "finished_at"])
@@ -46,7 +81,7 @@ def vocal_cues(file_path: Path, output: Path | None = None, window: int = 60, mi
     columns = (TextColumn("{task.description}"), BarColumn(complete_style="blue", finished_style="blue", pulse_style="blue"), MofNCompleteColumn(), TimeElapsedColumn())
 
     try:
-        with Progress(*columns, disable=silent) as progress:
+        with Progress(*columns, console=console, disable=silent) as progress:
             model_task = progress.add_task("loading model", total=None)
             from vocal_cues import get_vocal_cues # lazy import, loading the demucs model is slow
             progress.remove_task(model_task)
@@ -79,7 +114,7 @@ def vocal_cues(file_path: Path, output: Path | None = None, window: int = 60, mi
                     progress.advance(files_task)
 
                 elapsed = time.perf_counter() - start
-                finished_at = f"[{datetime.now():%Y-%m-%d %H:%M:%S}]"
+                finished_at = f"{datetime.now():%Y-%m-%d %H:%M:%S}"
 
                 row = row_table()
                 row.add_row(finished_at, str(f), f"{v_s:.3f}", f"{v_e:.3f}", f"{elapsed:.2f}")
