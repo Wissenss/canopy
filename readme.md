@@ -38,16 +38,34 @@ canopy.exe vocal-cues "./animal_i_have_become.mp3"
 
 ### query command
 
-Third party systems may benefit from this sort of information, this command aims to provide a way for that data to be ingested by **RDMS**. Basically this constructs an `UPDATE` query so you can save this information to your favorite database.
+Third-party systems may benefit from the information extracted by Canopy. The query command provides a way to integrate this data into **RDMS** by generating query strings that can be executed against your database.
 
-This is only a provisional solution, you should implement a way for your system to ingest **\*.csv** files, that way you may control every kind of transformation specific to your system.
+This command generates a query by replacing predefined placeholders in a user-provided pattern with the corresponding values extracted from audio files or supplied through command-line arguments.
+
+This is a provisional integration solution. For production use, it is recommended to implement a mechanism for ingesting **\*.csv** files directly into your system. This approach provides greater flexibility and allows you to handle any transformations required by your application's data model.
 
 ```bash
-canopy.exe query "./animal_i_have_become.mp3" --output "./query.sql" --table-name "songs" --
+canopy.exe query "./animal_i_have_become.mp3" --pattern "UPDATE songs SET s_v = #vocals_start_s#, s_e = #vocals_end_s# WHERE song_id = #val_1#" --val-1 2
 ```
 
 This produces the query:
 
 ```sql
-UPDATE songs SET vocal_start = 26 AND vocals_end = 241 WHERE song_id = 2;
+UPDATE songs SET v_s = 26 AND v_e = 241 WHERE song_id = 2;
 ```
+
+#### options
+
+`--file-path [path]` : the path for an audio file, directory or **\*.csv** file. This is a required argument.
+
+`--csv-val-1-column` : if `--file-path` is a **\*.csv** file this columns value will be used to replace the tag `"#csv_val_1#"` in the providen `--pattern`. There are 8 variations of this argument with similar behaviour: `--csv-val-2-column`, `--csv-val-3-column` and so on.
+
+`--val-1` : the value to replace the tag **#val_1#** in the providen `--pattern`. There are 8 variations of this argument with similar behaviour: `--val-2`, `--val-3` and so on.
+
+`--pattern [patter]` : the pattern to use for query generation, one line per audio will be created using this pattern and replacing the tags, if any. The follwing tags are available:
+- **#vocals_start_s#** the vocals start in seconds.
+- **#vocals_start_ms#** the vocals start in miliseconds.
+- **#vocals_end_s#** the vocals end in seconds.
+- **#vocals_end_ms#** the vocals end in miliseconds.
+- **#val_1#** the providen `--val-1` value. There are eight variations of this field with similar behaviour: **#val_2#**, **#val_3#** and so on.
+- **#csv_val_1#** the providen `--csv-val-1-column` column value if `--file-path` is a **\*.csv** file. There are eight variations of this field with similar behaviour: **#csv_val_2#**, **#csv_val_3#** and so on.
