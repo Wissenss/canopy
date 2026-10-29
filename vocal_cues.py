@@ -58,13 +58,13 @@ def _get_vocals_db(file_path: str, offset: float, duration: float):
 
     return librosa.amplitude_to_db(librosa.feature.rms(y=vocals, hop_length=HOP_LENGTH)[0] + 1e-9), sr
 
-def get_vocal_cues(file_path: str, analisis_window: int = 60, min_vocals_db: float = -40):
+def get_vocal_cues(file_path: str, analisis_window: int = 60, min_vocals_db: float = -18):
     """
         returns the second when the voice starts / end in the given audio file.
 
         parms:
             analisis_window : int = 60 seconds -> this functions checks the first and last <analisis_window> seconds
-            min_vocals_db : float = -40 dBFS -> frames of the vocals track above this level are considered voice
+            min_vocals_db : float = -18 dBFS -> frames of the vocals track above this level are considered voice
     """
 
     total = librosa.get_duration(path=file_path)

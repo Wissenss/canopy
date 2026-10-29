@@ -9,11 +9,23 @@ from rich.table import Table
 from rich.progress import Progress, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn
 from banner import print_banner
 from version import __version__
-from query_builder import seconds_to_ms, build_cue_update
+from query_builder import TAG_COUNT, cue_values, pattern_tags, build_query
 
 app = App(name="canopy", version=__version__)
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".ogg"}
+TABLE_EXTENSIONS = {".csv", ".xls", ".xlsx"}
+
+def _list_audio_files(file_path: Path, recursive: bool) -> list[Path]:
+    """
+        returns the audio files in file_path when it is a directory, or file_path itself otherwise.
+    """
+
+    if not file_path.is_dir():
+        return [file_path]
+
+    pattern = "**/*" if recursive else "*"
+    return sorted(f for f in file_path.glob(pattern) if f.is_file() and f.suffix.lower() in AUDIO_EXTENSIONS)
 
 def _print_params(console: Console, params: list[tuple[str, str]]):
     """
@@ -81,7 +93,7 @@ def _analyze_files(console: Console, files: list[Path], window: int, min_db: flo
         progress.update(files_task, description="done")
 
 @app.command
-def vocal_cues(file_path: Path, output: Path | None = None, window: int = 60, min_db: float = -40, recursive: bool = False, silent: bool = False):
+def vocal_cues(file_path: Path, output: Path | None = None, window: int = 60, min_db: float = -18, recursive: bool = False, silent: bool = False):
     """
         prints the second when the voice starts / ends in the given audio file(s).
 
@@ -99,11 +111,7 @@ def vocal_cues(file_path: Path, output: Path | None = None, window: int = 60, mi
     if not silent:
         print_banner(console)
 
-    if file_path.is_dir():
-        pattern = "**/*" if recursive else "*"
-        files = sorted(f for f in file_path.glob(pattern) if f.is_file() and f.suffix.lower() in AUDIO_EXTENSIONS)
-    else:
-        files = [file_path]
+    files = _list_audio_files(file_path, recursive)
 
     params = [
         ("version", __version__),
@@ -203,20 +211,21 @@ def _read_rows(path: Path):
 
     yield from rows
 
-def _read_cartuchos_csv(csv_path: Path, base_path: Path | None = None, file_column: str | None = None, id_column: str | None = None) -> list[tuple[Path, int]]:
+def _read_csv_entries(csv_path: Path, base_path: Path | None = None, file_column: str | None = None, value_columns: dict[int, str] | None = None) -> list[tuple[Path, dict[int, str]]]:
     """
-        reads the (audio file, CartuchoId) pairs from csv_path.
+        reads the (audio file, {N: csv_val_N}) pairs from csv_path.
 
-        without column names the first column is the file and the second one the CartuchoId, the header row is optional;
-        with column names (file_column / id_column) the first row must be the header, a missing name falls back to its default position.
-        blank lines and '#' lines are skipped; relative audio paths are resolved from base_path (defaults to the csv folder).
+        without column names the first column is the file and the header row is optional (skipped when its first cell is not an audio file);
+        with column names (file_column / value_columns) the first row must be the header, a missing file_column falls back to the first column.
+        blank lines and '#' lines are skipped; relative audio paths are resolved from base_path, if given.
     """
 
-    if base_path is None:
-        base_path = csv_path.parent
+    if value_columns is None:
+        value_columns = {}
 
-    use_header = file_column is not None or id_column is not None
-    file_idx, id_idx = 0, 1
+    use_header = file_column is not None or bool(value_columns)
+    file_idx = 0
+    value_idx = {}
     header_read = False
 
     entries = []
@@ -224,56 +233,50 @@ def _read_cartuchos_csv(csv_path: Path, base_path: Path | None = None, file_colu
         if not row or not row[0].strip() or row[0].lstrip().startswith("#"):
             continue
 
-        if use_header and not header_read:
+        if not header_read:
             header_read = True
-            if file_column is not None:
-                file_idx = _find_column(row, file_column)
-            if id_column is not None:
-                id_idx = _find_column(row, id_column)
-            continue
+            if use_header:
+                if file_column is not None:
+                    file_idx = _find_column(row, file_column)
+                value_idx = {n: _find_column(row, name) for n, name in value_columns.items()}
+                continue
+            if Path(row[0].strip()).suffix.lower() not in AUDIO_EXTENSIONS:
+                continue
 
-        if len(row) <= max(file_idx, id_idx):
+        if len(row) <= max([file_idx, *value_idx.values()]):
             print(f"{csv_path}:{line_no}: missing columns, skipped", file=sys.stderr)
             continue
 
-        try:
-            cartucho_id = int(row[id_idx].strip())
-        except ValueError:
-            # header row (only when no column names were given)
-            if not use_header and not header_read:
-                header_read = True
-                continue
-            print(f"{csv_path}:{line_no}: invalid CartuchoId '{row[id_idx]}', skipped", file=sys.stderr)
-            continue
-
-        header_read = True
-
         audio_path = Path(row[file_idx].strip())
-        if not audio_path.is_absolute():
+        if base_path is not None and not audio_path.is_absolute():
             audio_path = base_path / audio_path
 
-        entries.append((audio_path, cartucho_id))
+        entries.append((audio_path, {n: row[idx].strip() for n, idx in value_idx.items()}))
 
     return entries
 
 @app.command
-def tsaq(csv_path: Path, output: Path | None = None, base_path: Path | None = None, file_column: str | None = None, id_column: str | None = None, start_offset: float = 0,
-         end_offset: float = 0, content_type: int = 3, window: int = 60, min_db: float = -40, silent: bool = False):
+def query(file_path: Path, *, pattern: str, output: Path = Path("output.sql"), base_path: Path | None = None, csv_file_column: str | None = None, recursive: bool = False,
+          window: int = 60, min_db: float = -18, silent: bool = False,
+          val_1: str | None = None, val_2: str | None = None, val_3: str | None = None, val_4: str | None = None,
+          val_5: str | None = None, val_6: str | None = None, val_7: str | None = None, val_8: str | None = None,
+          csv_val_1_column: str | None = None, csv_val_2_column: str | None = None, csv_val_3_column: str | None = None, csv_val_4_column: str | None = None,
+          csv_val_5_column: str | None = None, csv_val_6_column: str | None = None, csv_val_7_column: str | None = None, csv_val_8_column: str | None = None):
     """
-        produces a .sql file that updates the CARTUCHOS vocals start / end (TiempoEntrada / TiempoSalida) of the audio files listed in a csv.
+        generates one query per audio file replacing the #tags# of pattern with the vocals start / end and the given values.
 
         parms:
-            csv_path : .csv, .xls or .xlsx file with the audio file path in the first column and the CartuchoId in the second one
-            output : .sql file to write, defaults to csv_path with the .sql extension
-            base_path : folder the relative audio paths in the csv are relative to, defaults to the csv folder
-            file_column : name of the csv column with the audio file path, defaults to the first column
-            id_column : name of the csv column with the CartuchoId, defaults to the second column
-            start_offset : seconds added to the vocals start (can be negative)
-            end_offset : seconds added to the vocals end (can be negative)
-            content_type : TipoContenido used in the WHERE clause
+            file_path : audio file, directory with audio files or .csv / .xls / .xlsx file with the audio file paths
+            pattern : query pattern, tags: #file_name#, #vocals_start_s#, #vocals_start_ms#, #vocals_end_s#, #vocals_end_ms#, #val_N#, #csv_val_N# (N = 1..8)
+            output : .sql file to write the queries to, defaults to ./output.sql
+            base_path : folder the relative audio paths in the csv are relative to, defaults to none (paths used as is)
+            csv_file_column : name of the csv column with the audio file path, defaults to the first column
+            recursive : when file_path is a directory, also look in its subdirectories
             window : seconds analyzed at the start / end of each file
             min_db : vocals level (dBFS) considered voice
             silent : disables the progress indicators
+            val_N : value of the #val_N# tag
+            csv_val_N_column : name of the csv column whose value replaces the #csv_val_N# tag
     """
 
     console = Console()
@@ -281,27 +284,49 @@ def tsaq(csv_path: Path, output: Path | None = None, base_path: Path | None = No
     if not silent:
         print_banner(console)
 
-    if output is None:
-        output = csv_path.with_suffix(".sql")
+    vals = {n: v for n, v in enumerate((val_1, val_2, val_3, val_4, val_5, val_6, val_7, val_8), start=1) if v is not None}
+    csv_columns = {n: c for n, c in enumerate((csv_val_1_column, csv_val_2_column, csv_val_3_column, csv_val_4_column,
+                                               csv_val_5_column, csv_val_6_column, csv_val_7_column, csv_val_8_column), start=1) if c is not None}
+    is_table = file_path.suffix.lower() in TABLE_EXTENSIONS
 
-    try:
-        entries = _read_cartuchos_csv(csv_path, base_path, file_column, id_column)
-    except Exception as exc:
-        print(f"{csv_path}: {exc}", file=sys.stderr)
+    # every #val_N# / #csv_val_N# tag in the pattern needs its value
+    tags = pattern_tags(pattern)
+    missing = [f"--val-{n}" for n in range(1, TAG_COUNT + 1) if f"val_{n}" in tags and n not in vals]
+    missing += [f"--csv-val-{n}-column" for n in range(1, TAG_COUNT + 1) if f"csv_val_{n}" in tags and n not in csv_columns]
+    if missing:
+        print(f"the pattern uses tags without value, missing: {', '.join(missing)}", file=sys.stderr)
         return
+    if csv_columns and not is_table:
+        print("--csv-val-N-column options require file_path to be a .csv / .xls / .xlsx file", file=sys.stderr)
+        return
+
+    if is_table:
+        try:
+            entries = _read_csv_entries(file_path, base_path, csv_file_column, csv_columns)
+        except Exception as exc:
+            print(f"{file_path}: {exc}", file=sys.stderr)
+            return
+    else:
+        entries = [(f, {}) for f in _list_audio_files(file_path, recursive)]
 
     params = [
         ("version", __version__),
         ("started_at", f"{datetime.now():%Y-%m-%d %H:%M:%S}"),
-        ("csv_path", str(csv_path)),
-        ("base_path", str(base_path) if base_path is not None else f"{csv_path.parent} (csv folder)"),
-        ("file_column", file_column if file_column is not None else "1st column"),
-        ("id_column", id_column if id_column is not None else "2nd column"),
+        ("file_path", str(file_path)),
         ("files", str(len(entries))),
+        ("pattern", pattern),
         ("output", str(output)),
-        ("start_offset", f"{start_offset} s"),
-        ("end_offset", f"{end_offset} s"),
-        ("content_type", str(content_type)),
+        *((f"val_{n}", v) for n, v in vals.items()),
+        *((f"csv_val_{n}_column", c) for n, c in csv_columns.items()),
+    ]
+    if is_table:
+        params += [
+            ("base_path", str(base_path) if base_path is not None else "-"),
+            ("csv_file_column", csv_file_column if csv_file_column is not None else "1st column"),
+        ]
+    else:
+        params.append(("recursive", str(recursive)))
+    params += [
         ("window", f"{window} s"),
         ("min_db", f"{min_db} dBFS"),
         ("silent", str(silent)),
@@ -309,31 +334,29 @@ def tsaq(csv_path: Path, output: Path | None = None, base_path: Path | None = No
     _print_params(console, params)
 
     if not entries:
-        print(f"no audio files found in {csv_path}", file=sys.stderr)
+        print(f"no audio files found in {file_path}", file=sys.stderr)
         return
 
-    import librosa
-
     with open(output, "w", encoding="utf-8") as out_file:
+        # parameters as sql comment lines
         for key, value in params:
             out_file.write(f"-- {key}: {value}\n")
         out_file.write("\n")
 
         files = [audio_path for audio_path, _ in entries]
         for i, f, v_s, v_e, _, _ in _analyze_files(console, files, window, min_db, silent):
-            cartucho_id = entries[i][1]
-
             if v_s == 0 and v_e == 0:
-                out_file.write(f"-- CartuchoId {cartucho_id} ({f}): no vocals found\n")
+                out_file.write(f"-- {f}: no vocals found\n")
                 out_file.flush()
                 continue
 
-            # offsets are applied in seconds, then the times are kept inside the file
-            duration = librosa.get_duration(path=str(f))
-            start = min(max(0.0, v_s + start_offset), duration)
-            end = min(max(start, v_e + end_offset), duration)
-
-            out_file.write(build_cue_update(cartucho_id, seconds_to_ms(start), seconds_to_ms(end), content_type) + "\n")
+            values = {
+                **cue_values(v_s, v_e),
+                "file_name": f.name,
+                **{f"val_{n}": v for n, v in vals.items()},
+                **{f"csv_val_{n}": v for n, v in entries[i][1].items()},
+            }
+            out_file.write(build_query(pattern, values) + "\n")
             out_file.flush()
 
 if __name__ == "__main__":

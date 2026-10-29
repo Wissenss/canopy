@@ -1,3 +1,7 @@
+import re
+
+TAG_COUNT = 8
+
 def seconds_to_ms(seconds: float) -> int:
     """
         converts seconds to whole milliseconds.
@@ -6,15 +10,34 @@ def seconds_to_ms(seconds: float) -> int:
     return int(round(seconds * 1000))
 
 
-def build_cue_update(cartucho_id: int, start_ms: int, end_ms: int, content_type: int = 3) -> str:
+def cue_values(v_s: float, v_e: float) -> dict[str, str]:
     """
-        returns the UPDATE query that sets the vocals start / end (TiempoEntrada / TiempoSalida, in ms) of a CARTUCHOS row.
+        returns the vocals start / end tag values (in seconds and milliseconds).
     """
 
-    # int() keeps the query free of anything that is not a number
-    return (f"UPDATE CARTUCHOS SET TiempoEntrada = {int(start_ms)}, TiempoSalida = {int(end_ms)} "
-            f"WHERE CartuchoId = {int(cartucho_id)} AND TipoContenido = {int(content_type)};")
+    return {
+        "vocals_start_s": str(int(round(v_s))),
+        "vocals_start_ms": str(seconds_to_ms(v_s)),
+        "vocals_end_s": str(int(round(v_e))),
+        "vocals_end_ms": str(seconds_to_ms(v_e)),
+    }
+
+
+def pattern_tags(pattern: str) -> set[str]:
+    """
+        returns the names of the #tag# placeholders used in pattern.
+    """
+
+    return set(re.findall(r"#(\w+)#", pattern))
+
+
+def build_query(pattern: str, values: dict[str, str]) -> str:
+    """
+        returns pattern with each #tag# replaced by its value, unknown tags are left as is.
+    """
+
+    return re.sub(r"#(\w+)#", lambda m: values.get(m.group(1), m.group(0)), pattern)
 
 
 if __name__ == "__main__":
-    print(build_cue_update(39, seconds_to_ms(10.22), seconds_to_ms(194.068)))
+    print(build_query("UPDATE songs SET v_s = #vocals_start_s#, v_e = #vocals_end_s# WHERE song_id = #val_1#;", {**cue_values(10.22, 194.068), "val_1": "2"}))
