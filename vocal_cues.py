@@ -58,37 +58,77 @@ def _get_vocals_db(file_path: str, offset: float, duration: float):
 
     return librosa.amplitude_to_db(librosa.feature.rms(y=vocals, hop_length=HOP_LENGTH)[0] + 1e-9), sr
 
-def get_vocal_cues(file_path: str, analisis_window: int = 60, min_vocals_db: float = -18):
+def _sustained_segments(voiced: np.ndarray, sr: int, min_sustain: float, min_sustain_interval: float) -> list[tuple[int, int]]:
+    """
+        returns the (first, last) frame of each voiced segment lasting at least min_sustain seconds.
+
+        voiced frames separated by gaps up to min_sustain_interval seconds belong to the same segment (0 -> only continuous vocals).
+    """
+
+    idx = np.flatnonzero(voiced)
+    if idx.size == 0:
+        return []
+
+    frame_s = HOP_LENGTH / sr
+    max_gap = int(min_sustain_interval / frame_s)
+
+    # a new segment starts where the distance to the previous voiced frame is bigger than the tolerated gap
+    breaks = np.flatnonzero(np.diff(idx) > max_gap + 1)
+    starts = np.concatenate(([idx[0]], idx[breaks + 1]))
+    ends = np.concatenate((idx[breaks], [idx[-1]]))
+
+    return [(int(s), int(e)) for s, e in zip(starts, ends) if (e - s + 1) * frame_s >= min_sustain]
+
+def get_vocal_cues(file_path: str, analisis_window: int = 60, min_vocals_db: float | None = -18, min_relative_db: float | None = None,
+                   min_sustain: float = 0, min_sustain_interval: float = 0):
     """
         returns the second when the voice starts / end in the given audio file.
 
         parms:
             analisis_window : int = 60 seconds -> this functions checks the first and last <analisis_window> seconds
-            min_vocals_db : float = -18 dBFS -> frames of the vocals track above this level are considered voice
+            min_vocals_db : float = -18 dBFS -> frames of the vocals track above this level are considered voice, None -> not used
+            min_relative_db : float = None dB -> frames of the vocals track up to this many dB below its peak are considered voice, None -> not used
+                              (the peak is taken from both analyzed windows; when used along min_vocals_db a frame must pass both)
+            min_sustain : float = 0 seconds -> vocals must last at least this long to count as the start / end
+            min_sustain_interval : float = 0 seconds -> gaps between vocals up to this long still count for min_sustain, 0 -> continuous vocals
     """
 
     total = librosa.get_duration(path=file_path)
 
-    # get the first spoken segment
-    v_db, sr = _get_vocals_db(file_path, 0, analisis_window)
-    voiced = np.flatnonzero(v_db > min_vocals_db)
+    start_db, sr = _get_vocals_db(file_path, 0, analisis_window)
 
-    # check if there is any speaking at all...
-    if voiced.size == 0:
+    # min_relative_db only makes thresholds stricter, so without any frame above min_vocals_db there are no vocals at all
+    if min_vocals_db is not None and not np.any(start_db > min_vocals_db):
         return 0, 0
 
-    v_s = float(librosa.frames_to_time(voiced[0], sr=sr, hop_length=HOP_LENGTH))
-
-    # get the last spoken segment (reuse the first window if the file is short)
+    # last window (reuse the first one if the file is short)
     offset = 0.0
+    end_db = start_db
     if total > analisis_window:
         offset = total - analisis_window
-        v_db, sr = _get_vocals_db(file_path, offset, analisis_window)
-        voiced = np.flatnonzero(v_db > min_vocals_db)
+        end_db, sr = _get_vocals_db(file_path, offset, analisis_window)
+
+    threshold = -np.inf
+    if min_vocals_db is not None:
+        threshold = min_vocals_db
+    if min_relative_db is not None:
+        threshold = max(threshold, max(start_db.max(), end_db.max()) - min_relative_db)
+
+    # get the first sustained vocals segment
+    start_segments = _sustained_segments(start_db > threshold, sr, min_sustain, min_sustain_interval)
+
+    # check if there is any speaking at all...
+    if not start_segments:
+        return 0, 0
+
+    v_s = float(librosa.frames_to_time(start_segments[0][0], sr=sr, hop_length=HOP_LENGTH))
+
+    # get the last sustained vocals segment
+    end_segments = _sustained_segments(end_db > threshold, sr, min_sustain, min_sustain_interval)
 
     v_f = total
-    if voiced.size > 0:
-        v_f = min(total, offset + float(librosa.frames_to_time(voiced[-1] + 1, sr=sr, hop_length=HOP_LENGTH)))
+    if end_segments:
+        v_f = min(total, offset + float(librosa.frames_to_time(end_segments[-1][1] + 1, sr=sr, hop_length=HOP_LENGTH)))
 
     return v_s, v_f
 

@@ -5,3 +5,4 @@ other/
 models/
 __pycache__/
 build_info.py
+*.sql

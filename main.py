@@ -40,9 +40,29 @@ def _print_params(console: Console, params: list[tuple[str, str]]):
     console.print(params_table)
     console.print()
 
-def _analyze_files(console: Console, files: list[Path], window: int, min_db: float, silent: bool):
+def _cue_options(window: int, min_db: float, min_relative_db: float | None, min_sustain: float, min_sustain_interval: float) -> dict:
     """
-        runs get_vocal_cues on each file showing the progress and a results table.
+        returns the get_vocal_cues keyword arguments for the audio processing options.
+    """
+
+    return {"analisis_window": window, "min_vocals_db": min_db, "min_relative_db": min_relative_db, "min_sustain": min_sustain, "min_sustain_interval": min_sustain_interval}
+
+def _cue_params(window: int, min_db: float, min_relative_db: float | None, min_sustain: float, min_sustain_interval: float) -> list[tuple[str, str]]:
+    """
+        returns the audio processing options as (name, value) pairs to log.
+    """
+
+    return [
+        ("window", f"{window} s"),
+        ("min_db", f"{min_db} dBFS"),
+        ("min_relative_db", f"{min_relative_db} dB below peak" if min_relative_db is not None else "-"),
+        ("min_sustain", f"{min_sustain} s"),
+        ("min_sustain_interval", f"{min_sustain_interval} s"),
+    ]
+
+def _analyze_files(console: Console, files: list[Path], cue_options: dict, silent: bool):
+    """
+        runs get_vocal_cues (with cue_options as keyword arguments) on each file showing the progress and a results table.
 
         yields (index, file, v_s, v_e, elapsed, finished_at) for each file processed successfully, index is the position in files.
     """
@@ -74,7 +94,7 @@ def _analyze_files(console: Console, files: list[Path], window: int, min_db: flo
             progress.update(files_task, description=f"analyzing {f.name}")
             start = time.perf_counter()
             try:
-                v_s, v_e = get_vocal_cues(str(f), window, min_db)
+                v_s, v_e = get_vocal_cues(str(f), **cue_options)
             except Exception as exc:
                 print(f"{datetime.now():%Y-%m-%d %H:%M:%S}  {str(f):<{file_w}}  error: {exc} ({time.perf_counter() - start:.2f}s)", file=sys.stderr)
                 continue
@@ -93,17 +113,31 @@ def _analyze_files(console: Console, files: list[Path], window: int, min_db: flo
         progress.update(files_task, description="done")
 
 @app.command
-def vocal_cues(file_path: Path, output: Path | None = None, window: int = 60, min_db: float = -18, recursive: bool = False, silent: bool = False):
+def vocal_cues(file_path: Path, output: Path | None = None, window: int = 60, min_db: float = -18, min_relative_db: float | None = None, min_sustain: float = 0,
+               min_sustain_interval: float = 0, recursive: bool = False, silent: bool = False):
     """
-        prints the second when the voice starts / ends in the given audio file(s).
+    Prints the second when the voice starts / ends in the given audio file(s).
 
-        parms:
-            file_path : audio file to analyze, or a directory with audio files
-            output : optional .csv or .txt file to store the results
-            window : seconds analyzed at the start / end of each file
-            min_db : vocals level (dBFS) considered voice
-            recursive : when file_path is a directory, also look in its subdirectories
-            silent : disables the progress indicators
+    Parameters
+    ----------
+    file_path
+        Audio file to analyze, or a directory with audio files.
+    output
+        Optional .csv or .txt file to store the results.
+    window
+        Seconds analyzed at the start / end of each file.
+    min_db
+        Vocals level (dBFS) considered voice.
+    min_relative_db
+        Vocals up to this many dB below the vocals peak are considered voice, can be used along --min-db.
+    min_sustain
+        Seconds the vocals must last to be considered the start / end.
+    min_sustain_interval
+        Seconds of silence tolerated between vocals for --min-sustain, 0 = continuous vocals.
+    recursive
+        When file_path is a directory, also look in its subdirectories.
+    silent
+        Disables the banner and progress indicators.
     """
 
     console = Console()
@@ -119,8 +153,7 @@ def vocal_cues(file_path: Path, output: Path | None = None, window: int = 60, mi
         ("file_path", str(file_path)),
         ("files", str(len(files))),
         ("output", str(output) if output is not None else "-"),
-        ("window", f"{window} s"),
-        ("min_db", f"{min_db} dBFS"),
+        *_cue_params(window, min_db, min_relative_db, min_sustain, min_sustain_interval),
         ("recursive", str(recursive)),
         ("silent", str(silent)),
     ]
@@ -145,7 +178,8 @@ def vocal_cues(file_path: Path, output: Path | None = None, window: int = 60, mi
             writer.writerow(["file", "vocals_start", "vocals_end", "processing_time", "finished_at"])
 
     try:
-        for _, f, v_s, v_e, elapsed, finished_at in _analyze_files(console, files, window, min_db, silent):
+        cue_options = _cue_options(window, min_db, min_relative_db, min_sustain, min_sustain_interval)
+        for _, f, v_s, v_e, elapsed, finished_at in _analyze_files(console, files, cue_options, silent):
             if writer is not None:
                 writer.writerow([str(f), f"{v_s:.3f}", f"{v_e:.3f}", f"{elapsed:.2f}", finished_at])
             elif out_file is not None:
@@ -257,26 +291,72 @@ def _read_csv_entries(csv_path: Path, base_path: Path | None = None, file_column
 
 @app.command
 def query(file_path: Path, *, pattern: str, output: Path = Path("output.sql"), base_path: Path | None = None, csv_file_column: str | None = None, recursive: bool = False,
-          window: int = 60, min_db: float = -18, silent: bool = False,
+          window: int = 60, min_db: float = -18, min_relative_db: float | None = None, min_sustain: float = 0, min_sustain_interval: float = 0, silent: bool = False,
           val_1: str | None = None, val_2: str | None = None, val_3: str | None = None, val_4: str | None = None,
           val_5: str | None = None, val_6: str | None = None, val_7: str | None = None, val_8: str | None = None,
           csv_val_1_column: str | None = None, csv_val_2_column: str | None = None, csv_val_3_column: str | None = None, csv_val_4_column: str | None = None,
           csv_val_5_column: str | None = None, csv_val_6_column: str | None = None, csv_val_7_column: str | None = None, csv_val_8_column: str | None = None):
     """
-        generates one query per audio file replacing the #tags# of pattern with the vocals start / end and the given values.
+    Generates one query per audio file replacing the #tags# of pattern with the vocals start / end and the given values.
 
-        parms:
-            file_path : audio file, directory with audio files or .csv / .xls / .xlsx file with the audio file paths
-            pattern : query pattern, tags: #file_name#, #vocals_start_s#, #vocals_start_ms#, #vocals_end_s#, #vocals_end_ms#, #val_N#, #csv_val_N# (N = 1..8)
-            output : .sql file to write the queries to, defaults to ./output.sql
-            base_path : folder the relative audio paths in the csv are relative to, defaults to none (paths used as is)
-            csv_file_column : name of the csv column with the audio file path, defaults to the first column
-            recursive : when file_path is a directory, also look in its subdirectories
-            window : seconds analyzed at the start / end of each file
-            min_db : vocals level (dBFS) considered voice
-            silent : disables the progress indicators
-            val_N : value of the #val_N# tag
-            csv_val_N_column : name of the csv column whose value replaces the #csv_val_N# tag
+    Parameters
+    ----------
+    file_path
+        Audio file, directory with audio files or .csv / .xls / .xlsx file with the audio file paths.
+    pattern
+        Query pattern, tags: #file_name#, #vocals_start_s#, #vocals_start_ms#, #vocals_end_s#, #vocals_end_ms#, #val_N#, #csv_val_N# (N = 1..8).
+    output
+        .sql file to write the queries to.
+    base_path
+        Folder the relative audio paths in the csv are relative to, by default the paths are used as is.
+    csv_file_column
+        Name of the csv column with the audio file path, by default the first column.
+    recursive
+        When file_path is a directory, also look in its subdirectories.
+    window
+        Seconds analyzed at the start / end of each file.
+    min_db
+        Vocals level (dBFS) considered voice.
+    min_relative_db
+        Vocals up to this many dB below the vocals peak are considered voice, can be used along --min-db.
+    min_sustain
+        Seconds the vocals must last to be considered the start / end.
+    min_sustain_interval
+        Seconds of silence tolerated between vocals for --min-sustain, 0 = continuous vocals.
+    silent
+        Disables the banner and progress indicators.
+    val_1
+        Value of the #val_1# tag.
+    val_2
+        Value of the #val_2# tag.
+    val_3
+        Value of the #val_3# tag.
+    val_4
+        Value of the #val_4# tag.
+    val_5
+        Value of the #val_5# tag.
+    val_6
+        Value of the #val_6# tag.
+    val_7
+        Value of the #val_7# tag.
+    val_8
+        Value of the #val_8# tag.
+    csv_val_1_column
+        Name of the csv column whose value replaces the #csv_val_1# tag.
+    csv_val_2_column
+        Name of the csv column whose value replaces the #csv_val_2# tag.
+    csv_val_3_column
+        Name of the csv column whose value replaces the #csv_val_3# tag.
+    csv_val_4_column
+        Name of the csv column whose value replaces the #csv_val_4# tag.
+    csv_val_5_column
+        Name of the csv column whose value replaces the #csv_val_5# tag.
+    csv_val_6_column
+        Name of the csv column whose value replaces the #csv_val_6# tag.
+    csv_val_7_column
+        Name of the csv column whose value replaces the #csv_val_7# tag.
+    csv_val_8_column
+        Name of the csv column whose value replaces the #csv_val_8# tag.
     """
 
     console = Console()
@@ -327,8 +407,7 @@ def query(file_path: Path, *, pattern: str, output: Path = Path("output.sql"), b
     else:
         params.append(("recursive", str(recursive)))
     params += [
-        ("window", f"{window} s"),
-        ("min_db", f"{min_db} dBFS"),
+        *_cue_params(window, min_db, min_relative_db, min_sustain, min_sustain_interval),
         ("silent", str(silent)),
     ]
     _print_params(console, params)
@@ -344,7 +423,8 @@ def query(file_path: Path, *, pattern: str, output: Path = Path("output.sql"), b
         out_file.write("\n")
 
         files = [audio_path for audio_path, _ in entries]
-        for i, f, v_s, v_e, _, _ in _analyze_files(console, files, window, min_db, silent):
+        cue_options = _cue_options(window, min_db, min_relative_db, min_sustain, min_sustain_interval)
+        for i, f, v_s, v_e, _, _ in _analyze_files(console, files, cue_options, silent):
             if v_s == 0 and v_e == 0:
                 out_file.write(f"-- {f}: no vocals found\n")
                 out_file.flush()

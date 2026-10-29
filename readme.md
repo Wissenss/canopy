@@ -22,6 +22,12 @@ Process the given audio file and return when singing starts / end.
 canopy.exe vocal-cues "./animal_i_have_become.mp3" 
 ```
 
+Processing a whole directory with a threshold relative to each song's vocals level, ignoring vocals shorter than 2 seconds:
+
+```bash
+canopy.exe vocal-cues "./music" --min-db -40 --min-relative-db 20 --min-sustain 2 --min-sustain-interval 0.3 --output "./results.csv"
+```
+
 #### options
 
 `--file-path [path]` : the path for an audio file or directory, if `[path]` is a directory then all audio files in that directory will be processed. This is a required argument.
@@ -34,7 +40,13 @@ canopy.exe vocal-cues "./animal_i_have_become.mp3"
 
 `--min-db [db]` : `[db]` threashold to consider a sound in the vocals track, this controls how sensitive or not the filtering is. Default `-18` db.
 
-`--silent [bool]` : weather or not to output text to the console. Default `True`. 
+`--min-relative-db [db]` : a sound in the vocals track is considered voice when it is at most `[db]` below the loudest point of the vocals track (taken from both analysed windows), so the threshold adapts to each song's level. It can be used together with `--min-db`, then a sound must pass both thresholds; to use only the relative threshold set `--min-db` very low (e.g. `-100`). Default: not used.
+
+`--min-sustain [span]` : the vocals must last at least `[span]` seconds to be considered the start / end, this filters short spikes (a breath, a shout, an ad-lib) before the singing actually starts. Default `0`, any sound counts.
+
+`--min-sustain-interval [span]` : the silence in seconds tolerated between vocals so they still count as one for `--min-sustain`, that is with `--min-sustain 3 --min-sustain-interval 0.5` the vocals must last 3 seconds without pauses longer than half a second. Default `0`, the vocals must be continuous.
+
+`--silent [bool]` : weather or not to show the banner and progress indicators, the results are still printed. Default `False`. 
 
 ### query command
 
@@ -88,6 +100,8 @@ If the pattern uses a **#val_N#** or **#csv_val_N#** tag without its option, the
 `--window [span]` : the time `[span]` in seconds to analyse, that is if `[span]` is `60`, then the first and last 60 seconds will be analysed looking for vocal start and end. Default `60`.
 
 `--min-db [db]` : `[db]` threashold to consider a sound in the vocals track, this controls how sensitive or not the filtering is. Default `-18` db.
+
+`--min-relative-db [db]`, `--min-sustain [span]`, `--min-sustain-interval [span]` : same as in the [vocal-cues command](#options).
 
 `--silent [bool]` : weather or not to show the banner and progress indicators. Default `False`.
 
