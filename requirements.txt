@@ -7,3 +7,4 @@ xlrd
 openpyxl
 numpy
 pyinstaller
+py7zr
