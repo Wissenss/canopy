@@ -3,5 +3,7 @@ rich
 librosa
 torch
 demucs
+xlrd
+openpyxl
 numpy
 pyinstaller
