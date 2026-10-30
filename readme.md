@@ -104,6 +104,12 @@ If the pattern uses a **#val_N#** or **#csv_val_N#** tag without its option, the
 `--min-relative-db [db]`, `--min-sustain [span]`, `--min-sustain-interval [span]` : same as in the [vocal-cues command](#options).
 
 `--silent [bool]` : weather or not to show the banner and progress indicators. Default `False`.
+## For developers
 
-#### examples
+`requirements.txt` lists a plain `torch`, which pip installs from PyPI as the CPU-only build on Windows, so the tool will report `cpu (no cuda gpu found)` even on machines with an NVIDIA GPU. To get CUDA support, either add `--extra-index-url https://download.pytorch.org/whl/cu132` at the top of `requirements.txt`, or reinstall torch from that index:
 
+```
+.venv\Scripts\python.exe -m pip install --force-reinstall --no-deps torch --index-url https://download.pytorch.org/whl/cu132
+```
+
+Note that `build.cmd` bundles torch into the exe, so a CUDA build makes `canopy.exe` roughly 2–3 GB larger. The exe still runs on machines without a CUDA GPU, falling back to cpu.
