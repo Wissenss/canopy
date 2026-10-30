@@ -1,4 +1,3 @@
-import csv
 import sys
 import time
 from datetime import datetime
@@ -10,22 +9,31 @@ from rich.progress import Progress, TextColumn, BarColumn, MofNCompleteColumn, T
 from banner import print_banner
 from version import __version__
 from query_builder import TAG_COUNT, cue_values, pattern_tags, build_query
+from data_ingestor import CSV_EXTENSIONS, EXCEL_EXTENSIONS, Data, DataIngestor
+from data_exporter import DataExporter
 
 app = App(name="canopy", version=__version__)
 
-AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".ogg"}
-TABLE_EXTENSIONS = {".csv", ".xls", ".xlsx"}
+TABLE_EXTENSIONS = CSV_EXTENSIONS | EXCEL_EXTENSIONS
 
-def _list_audio_files(file_path: Path, recursive: bool) -> list[Path]:
+def _ingest(path: Path, recursive: bool, base_path: Path | None = None, file_column: str | None = None, vals: dict[int, str] | None = None,
+            columns: dict[int, str] | None = None) -> list[Data]:
     """
-        returns the audio files in file_path when it is a directory, or file_path itself otherwise.
+        returns the Data (audio file + val_N) to process from path, see DataIngestor.
+
+        vals are the val_N defaults and columns the table column names val_N take their value from, both keyed by N.
     """
 
-    if not file_path.is_dir():
-        return [file_path]
-
-    pattern = "**/*" if recursive else "*"
-    return sorted(f for f in file_path.glob(pattern) if f.is_file() and f.suffix.lower() in AUDIO_EXTENSIONS)
+    ingestor = DataIngestor()
+    ingestor.path = path
+    ingestor.recursive = recursive
+    ingestor.base_path = base_path
+    ingestor.tbl_col_name_file_path = file_column or ""
+    for n, v in (vals or {}).items():
+        setattr(ingestor, f"val_{n}", v)
+    for n, c in (columns or {}).items():
+        setattr(ingestor, f"tbl_col_name_val_{n}", c)
+    return ingestor.ingest()
 
 def _print_params(console: Console, params: list[tuple[str, str]]):
     """
@@ -113,17 +121,21 @@ def _analyze_files(console: Console, files: list[Path], cue_options: dict, silen
         progress.update(files_task, description="done")
 
 @app.command
-def vocal_cues(file_path: Path, output: Path | None = None, window: int = 60, min_db: float = -18, min_relative_db: float | None = None, min_sustain: float = 0,
-               min_sustain_interval: float = 0, recursive: bool = False, silent: bool = False):
+def vocal_cues(input: Path, output: Path | None = None, output_two: Path | None = None, output_three: Path | None = None, window: int = 60, min_db: float = -18,
+               min_relative_db: float | None = None, min_sustain: float = 0, min_sustain_interval: float = 0, recursive: bool = False, silent: bool = False):
     """
     Prints the second when the voice starts / ends in the given audio file(s).
 
     Parameters
     ----------
-    file_path
-        Audio file to analyze, or a directory with audio files.
+    input
+        Audio file to analyze, directory with audio files or .csv / .xls / .xlsx file with the audio file paths in its first column.
     output
-        Optional .csv or .txt file to store the results.
+        Optional .csv, .txt or .xlsx file to store the results.
+    output_two
+        Optional second .csv, .txt or .xlsx file to store the results.
+    output_three
+        Optional third .csv, .txt or .xlsx file to store the results.
     window
         Seconds analyzed at the start / end of each file.
     min_db
@@ -135,7 +147,7 @@ def vocal_cues(file_path: Path, output: Path | None = None, window: int = 60, mi
     min_sustain_interval
         Seconds of silence tolerated between vocals for --min-sustain, 0 = continuous vocals.
     recursive
-        When file_path is a directory, also look in its subdirectories.
+        When input is a directory, also look in its subdirectories.
     silent
         Disables the banner and progress indicators.
     """
@@ -145,14 +157,21 @@ def vocal_cues(file_path: Path, output: Path | None = None, window: int = 60, mi
     if not silent:
         print_banner(console)
 
-    files = _list_audio_files(file_path, recursive)
+    try:
+        entries = _ingest(input, recursive)
+    except Exception as exc:
+        print(f"{input}: {exc}", file=sys.stderr)
+        return
+    files = [d.file_path for d in entries]
 
     params = [
         ("version", __version__),
         ("started_at", f"{datetime.now():%Y-%m-%d %H:%M:%S}"),
-        ("file_path", str(file_path)),
+        ("input", str(input)),
         ("files", str(len(files))),
         ("output", str(output) if output is not None else "-"),
+        ("output_two", str(output_two) if output_two is not None else "-"),
+        ("output_three", str(output_three) if output_three is not None else "-"),
         *_cue_params(window, min_db, min_relative_db, min_sustain, min_sustain_interval),
         ("recursive", str(recursive)),
         ("silent", str(silent)),
@@ -160,137 +179,44 @@ def vocal_cues(file_path: Path, output: Path | None = None, window: int = 60, mi
     _print_params(console, params)
 
     if not files:
-        print(f"no audio files found in {file_path}", file=sys.stderr)
+        print(f"no audio files found in {input}", file=sys.stderr)
         return
 
-    out_file = None
-    writer = None
-    if output is not None:
-        out_file = open(output, "w", newline="", encoding="utf-8")
-
-        # parameters as '#' comment lines (pandas: read_csv(..., comment="#"))
-        for key, value in params:
-            out_file.write(f"# {key}: {value}\n")
-        out_file.write("\n")
-
-        if output.suffix.lower() == ".csv":
-            writer = csv.writer(out_file)
-            writer.writerow(["file", "vocals_start", "vocals_end", "processing_time", "finished_at"])
+    # one exporter per output, all are created before processing so an invalid output fails early
+    exporters = []
+    for path in (output, output_two, output_three):
+        if path is None:
+            continue
+        exporter = DataExporter()
+        exporter.path = path
+        exporter.params = params
+        try:
+            exporter.begin_writing()
+        except Exception as exc:
+            print(exc, file=sys.stderr)
+            for e in exporters:
+                e.end_writing()
+            return
+        exporters.append(exporter)
 
     try:
         cue_options = _cue_options(window, min_db, min_relative_db, min_sustain, min_sustain_interval)
-        for _, f, v_s, v_e, elapsed, finished_at in _analyze_files(console, files, cue_options, silent):
-            if writer is not None:
-                writer.writerow([str(f), f"{v_s:.3f}", f"{v_e:.3f}", f"{elapsed:.2f}", finished_at])
-            elif out_file is not None:
-                out_file.write(f"file: {f}\nvocals_start: {v_s:.3f}\nvocals_end: {v_e:.3f}\nprocessing_time: {elapsed:.2f}\nfinished_at: {finished_at}\n\n")
+        for i, _, v_s, v_e, elapsed, finished_at in _analyze_files(console, files, cue_options, silent):
+            data = entries[i]
+            data.v_p = True
+            data.v_s = v_s
+            data.v_e = v_e
+            data.processing_time = elapsed
+            data.finished_at = finished_at
 
-            if out_file is not None:
-                out_file.flush()
+            for exporter in exporters:
+                exporter.write(data)
     finally:
-        if out_file is not None:
-            out_file.close()
-
-def _find_column(header: list[str], name: str) -> int:
-    """
-        returns the index of the column name in header (case insensitive), raises ValueError if missing.
-    """
-
-    names = [h.strip().lower() for h in header]
-    try:
-        return names.index(name.strip().lower())
-    except ValueError:
-        raise ValueError(f"column '{name}' not found, available columns: {', '.join(h.strip() for h in header)}") from None
-
-def _cell_to_str(value) -> str:
-    """
-        converts an excel cell value to text, whole numbers lose the '.0' excel adds (2990.0 -> '2990').
-    """
-
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return "" if value is None else str(value)
-
-def _read_rows(path: Path):
-    """
-        yields the rows (list of str) of the first sheet of a .xls / .xlsx file or of a .csv file (utf-8, falling back to the windows ansi codepage).
-    """
-
-    suffix = path.suffix.lower()
-
-    if suffix == ".xls":
-        import xlrd
-        sheet = xlrd.open_workbook(str(path)).sheet_by_index(0)
-        for r in range(sheet.nrows):
-            yield [_cell_to_str(v) for v in sheet.row_values(r)]
-        return
-
-    if suffix == ".xlsx":
-        import openpyxl
-        workbook = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
-        try:
-            for row in workbook.worksheets[0].iter_rows(values_only=True):
-                yield [_cell_to_str(v) for v in row]
-        finally:
-            workbook.close()
-        return
-
-    # csv files saved by excel on spanish windows are usually cp1252, not utf-8
-    try:
-        with open(path, newline="", encoding="utf-8-sig") as file:
-            rows = list(csv.reader(file))
-    except UnicodeDecodeError:
-        with open(path, newline="", encoding="cp1252") as file:
-            rows = list(csv.reader(file))
-
-    yield from rows
-
-def _read_csv_entries(csv_path: Path, base_path: Path | None = None, file_column: str | None = None, value_columns: dict[int, str] | None = None) -> list[tuple[Path, dict[int, str]]]:
-    """
-        reads the (audio file, {N: csv_val_N}) pairs from csv_path.
-
-        without column names the first column is the file and the header row is optional (skipped when its first cell is not an audio file);
-        with column names (file_column / value_columns) the first row must be the header, a missing file_column falls back to the first column.
-        blank lines and '#' lines are skipped; relative audio paths are resolved from base_path, if given.
-    """
-
-    if value_columns is None:
-        value_columns = {}
-
-    use_header = file_column is not None or bool(value_columns)
-    file_idx = 0
-    value_idx = {}
-    header_read = False
-
-    entries = []
-    for line_no, row in enumerate(_read_rows(csv_path), start=1):
-        if not row or not row[0].strip() or row[0].lstrip().startswith("#"):
-            continue
-
-        if not header_read:
-            header_read = True
-            if use_header:
-                if file_column is not None:
-                    file_idx = _find_column(row, file_column)
-                value_idx = {n: _find_column(row, name) for n, name in value_columns.items()}
-                continue
-            if Path(row[0].strip()).suffix.lower() not in AUDIO_EXTENSIONS:
-                continue
-
-        if len(row) <= max([file_idx, *value_idx.values()]):
-            print(f"{csv_path}:{line_no}: missing columns, skipped", file=sys.stderr)
-            continue
-
-        audio_path = Path(row[file_idx].strip())
-        if base_path is not None and not audio_path.is_absolute():
-            audio_path = base_path / audio_path
-
-        entries.append((audio_path, {n: row[idx].strip() for n, idx in value_idx.items()}))
-
-    return entries
+        for exporter in exporters:
+            exporter.end_writing()
 
 @app.command
-def query(file_path: Path, *, pattern: str, output: Path = Path("output.sql"), base_path: Path | None = None, csv_file_column: str | None = None, recursive: bool = False,
+def query(input: Path, *, pattern: str, output: Path = Path("output.sql"), base_path: Path | None = None, csv_file_column: str | None = None, recursive: bool = False,
           window: int = 60, min_db: float = -18, min_relative_db: float | None = None, min_sustain: float = 0, min_sustain_interval: float = 0, silent: bool = False,
           val_1: str | None = None, val_2: str | None = None, val_3: str | None = None, val_4: str | None = None,
           val_5: str | None = None, val_6: str | None = None, val_7: str | None = None, val_8: str | None = None,
@@ -301,10 +227,10 @@ def query(file_path: Path, *, pattern: str, output: Path = Path("output.sql"), b
 
     Parameters
     ----------
-    file_path
+    input
         Audio file, directory with audio files or .csv / .xls / .xlsx file with the audio file paths.
     pattern
-        Query pattern, tags: #file_name#, #vocals_start_s#, #vocals_start_ms#, #vocals_end_s#, #vocals_end_ms#, #val_N#, #csv_val_N# (N = 1..8).
+        Query pattern, tags: #file_name#, #vocals_start_s#, #vocals_start_ms#, #vocals_end_s#, #vocals_end_ms#, #val_N# (alias #csv_val_N#, N = 1..8).
     output
         .sql file to write the queries to.
     base_path
@@ -312,7 +238,7 @@ def query(file_path: Path, *, pattern: str, output: Path = Path("output.sql"), b
     csv_file_column
         Name of the csv column with the audio file path, by default the first column.
     recursive
-        When file_path is a directory, also look in its subdirectories.
+        When input is a directory, also look in its subdirectories.
     window
         Seconds analyzed at the start / end of each file.
     min_db
@@ -326,37 +252,37 @@ def query(file_path: Path, *, pattern: str, output: Path = Path("output.sql"), b
     silent
         Disables the banner and progress indicators.
     val_1
-        Value of the #val_1# tag.
+        Value of the #val_1# tag, the default when --csv-val-1-column is not given or its cell is empty.
     val_2
-        Value of the #val_2# tag.
+        Value of the #val_2# tag, the default when --csv-val-2-column is not given or its cell is empty.
     val_3
-        Value of the #val_3# tag.
+        Value of the #val_3# tag, the default when --csv-val-3-column is not given or its cell is empty.
     val_4
-        Value of the #val_4# tag.
+        Value of the #val_4# tag, the default when --csv-val-4-column is not given or its cell is empty.
     val_5
-        Value of the #val_5# tag.
+        Value of the #val_5# tag, the default when --csv-val-5-column is not given or its cell is empty.
     val_6
-        Value of the #val_6# tag.
+        Value of the #val_6# tag, the default when --csv-val-6-column is not given or its cell is empty.
     val_7
-        Value of the #val_7# tag.
+        Value of the #val_7# tag, the default when --csv-val-7-column is not given or its cell is empty.
     val_8
-        Value of the #val_8# tag.
+        Value of the #val_8# tag, the default when --csv-val-8-column is not given or its cell is empty.
     csv_val_1_column
-        Name of the csv column whose value replaces the #csv_val_1# tag.
+        Name of the csv column whose value replaces the #val_1# (or #csv_val_1#) tag.
     csv_val_2_column
-        Name of the csv column whose value replaces the #csv_val_2# tag.
+        Name of the csv column whose value replaces the #val_2# (or #csv_val_2#) tag.
     csv_val_3_column
-        Name of the csv column whose value replaces the #csv_val_3# tag.
+        Name of the csv column whose value replaces the #val_3# (or #csv_val_3#) tag.
     csv_val_4_column
-        Name of the csv column whose value replaces the #csv_val_4# tag.
+        Name of the csv column whose value replaces the #val_4# (or #csv_val_4#) tag.
     csv_val_5_column
-        Name of the csv column whose value replaces the #csv_val_5# tag.
+        Name of the csv column whose value replaces the #val_5# (or #csv_val_5#) tag.
     csv_val_6_column
-        Name of the csv column whose value replaces the #csv_val_6# tag.
+        Name of the csv column whose value replaces the #val_6# (or #csv_val_6#) tag.
     csv_val_7_column
-        Name of the csv column whose value replaces the #csv_val_7# tag.
+        Name of the csv column whose value replaces the #val_7# (or #csv_val_7#) tag.
     csv_val_8_column
-        Name of the csv column whose value replaces the #csv_val_8# tag.
+        Name of the csv column whose value replaces the #val_8# (or #csv_val_8#) tag.
     """
 
     console = Console()
@@ -367,32 +293,29 @@ def query(file_path: Path, *, pattern: str, output: Path = Path("output.sql"), b
     vals = {n: v for n, v in enumerate((val_1, val_2, val_3, val_4, val_5, val_6, val_7, val_8), start=1) if v is not None}
     csv_columns = {n: c for n, c in enumerate((csv_val_1_column, csv_val_2_column, csv_val_3_column, csv_val_4_column,
                                                csv_val_5_column, csv_val_6_column, csv_val_7_column, csv_val_8_column), start=1) if c is not None}
-    is_table = file_path.suffix.lower() in TABLE_EXTENSIONS
+    is_table = input.suffix.lower() in TABLE_EXTENSIONS
 
-    # every #val_N# / #csv_val_N# tag in the pattern needs its value
+    # every #val_N# / #csv_val_N# tag in the pattern needs its value, from --val-N or --csv-val-N-column
     tags = pattern_tags(pattern)
-    missing = [f"--val-{n}" for n in range(1, TAG_COUNT + 1) if f"val_{n}" in tags and n not in vals]
-    missing += [f"--csv-val-{n}-column" for n in range(1, TAG_COUNT + 1) if f"csv_val_{n}" in tags and n not in csv_columns]
+    missing = [f"--val-{n} / --csv-val-{n}-column" for n in range(1, TAG_COUNT + 1)
+               if (f"val_{n}" in tags or f"csv_val_{n}" in tags) and n not in vals and n not in csv_columns]
     if missing:
         print(f"the pattern uses tags without value, missing: {', '.join(missing)}", file=sys.stderr)
         return
     if csv_columns and not is_table:
-        print("--csv-val-N-column options require file_path to be a .csv / .xls / .xlsx file", file=sys.stderr)
+        print("--csv-val-N-column options require input to be a .csv / .xls / .xlsx file", file=sys.stderr)
         return
 
-    if is_table:
-        try:
-            entries = _read_csv_entries(file_path, base_path, csv_file_column, csv_columns)
-        except Exception as exc:
-            print(f"{file_path}: {exc}", file=sys.stderr)
-            return
-    else:
-        entries = [(f, {}) for f in _list_audio_files(file_path, recursive)]
+    try:
+        entries = _ingest(input, recursive, base_path, csv_file_column, vals, csv_columns)
+    except Exception as exc:
+        print(f"{input}: {exc}", file=sys.stderr)
+        return
 
     params = [
         ("version", __version__),
         ("started_at", f"{datetime.now():%Y-%m-%d %H:%M:%S}"),
-        ("file_path", str(file_path)),
+        ("input", str(input)),
         ("files", str(len(entries))),
         ("pattern", pattern),
         ("output", str(output)),
@@ -413,7 +336,7 @@ def query(file_path: Path, *, pattern: str, output: Path = Path("output.sql"), b
     _print_params(console, params)
 
     if not entries:
-        print(f"no audio files found in {file_path}", file=sys.stderr)
+        print(f"no audio files found in {input}", file=sys.stderr)
         return
 
     with open(output, "w", encoding="utf-8") as out_file:
@@ -422,7 +345,7 @@ def query(file_path: Path, *, pattern: str, output: Path = Path("output.sql"), b
             out_file.write(f"-- {key}: {value}\n")
         out_file.write("\n")
 
-        files = [audio_path for audio_path, _ in entries]
+        files = [d.file_path for d in entries]
         cue_options = _cue_options(window, min_db, min_relative_db, min_sustain, min_sustain_interval)
         for i, f, v_s, v_e, _, _ in _analyze_files(console, files, cue_options, silent):
             if v_s == 0 and v_e == 0:
@@ -430,11 +353,13 @@ def query(file_path: Path, *, pattern: str, output: Path = Path("output.sql"), b
                 out_file.flush()
                 continue
 
+            # #csv_val_N# is kept as an alias of #val_N#, both take the column value or the --val-N default
+            row_vals = {n: getattr(entries[i], f"val_{n}") for n in range(1, TAG_COUNT + 1) if n in vals or n in csv_columns}
             values = {
                 **cue_values(v_s, v_e),
                 "file_name": f.name,
-                **{f"val_{n}": v for n, v in vals.items()},
-                **{f"csv_val_{n}": v for n, v in entries[i][1].items()},
+                **{f"val_{n}": v for n, v in row_vals.items()},
+                **{f"csv_val_{n}": v for n, v in row_vals.items()},
             }
             out_file.write(build_query(pattern, values) + "\n")
             out_file.flush()
